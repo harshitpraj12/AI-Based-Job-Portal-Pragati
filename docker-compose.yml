@@ -1,0 +1,166 @@
+services:
+  # ----------------------------------------------------------------------------
+  # 1. MySQL: Primary Relational Database for Users, Jobs, and Applications
+  # ----------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: jobportal-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-Harshit@1}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-jobportal}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD:-Harshit@1}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - jobportal-network
+
+  # ----------------------------------------------------------------------------
+  # 2. MariaDB: Vector Store Database for Spring AI Embeddings & Semantic Search
+  # ----------------------------------------------------------------------------
+  mariadb:
+    image: mariadb:11.4
+    container_name: jobportal-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-root123}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-vectordb}
+    ports:
+      - "${MARIADB_PORT:-3307}:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p$${MARIADB_ROOT_PASSWORD:-root123}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - jobportal-network
+
+  # ----------------------------------------------------------------------------
+  # 3. Ollama: Local AI LLM & Embedding Model Inference Server
+  # ----------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jobportal-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - jobportal-network
+
+  # ----------------------------------------------------------------------------
+  # Helper: Auto-pulls required models (llama3.2 and nomic-embed-text) on startup
+  # ----------------------------------------------------------------------------
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: jobportal-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - "-c"
+      - |
+        echo "Ensuring required Ollama models are pulled..."
+        ollama pull llama3.2
+        ollama pull nomic-embed-text
+        echo "Ollama models are ready!"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    networks:
+      - jobportal-network
+    restart: "no"
+
+  # ----------------------------------------------------------------------------
+  # 4. Spring Boot Backend Application (Multi-stage, Non-root)
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./Ai-Based-Job-Portal
+      dockerfile: Dockerfile
+    image: jobportal-backend:latest
+    container_name: jobportal-backend
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8080
+      # Primary Relational DataSource (MySQL)
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-jobportal}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-Harshit@1}
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_JPA_SHOW_SQL: "false"
+
+      # MariaDB Vector Store DataSource
+      SPRING_VECTOR_DATASOURCE_URL: jdbc:mariadb://mariadb:3306/${MARIADB_DATABASE:-vectordb}?createDatabaseIfNotExist=true
+      SPRING_VECTOR_DATASOURCE_USERNAME: root
+      SPRING_VECTOR_DATASOURCE_PASSWORD: ${MARIADB_ROOT_PASSWORD:-root123}
+      SPRING_AI_VECTORSTORE_MARIADB_INITIALIZE_SCHEMA: "true"
+
+      # Ollama Service URL & Models
+      SPRING_AI_OLLAMA_BASE_URL: http://ollama:11434
+      SPRING_AI_OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-llama3.2}
+      SPRING_AI_OLLAMA_EMBEDDING_OPTIONS_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+
+      # Security & JWT Token Config
+      JWT_SECRET: ${JWT_SECRET:-your-super-secret-key-that-is-at-least-32-character-long}
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-86400000}
+
+      # Container Memory Tuning
+      JAVA_OPTS: "-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
+    volumes:
+      - uploads_data:/app/uploads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/jobs || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    networks:
+      - jobportal-network
+
+# ------------------------------------------------------------------------------
+# Named Persistent Volumes
+# ------------------------------------------------------------------------------
+volumes:
+  mysql_data:
+    name: jobportal_mysql_data
+  mariadb_data:
+    name: jobportal_mariadb_data
+  ollama_data:
+    name: jobportal_ollama_data
+  uploads_data:
+    name: jobportal_uploads_data
+
+# ------------------------------------------------------------------------------
+# Isolated Bridge Network
+# ------------------------------------------------------------------------------
+networks:
+  jobportal-network:
+    name: jobportal-network
+    driver: bridge
